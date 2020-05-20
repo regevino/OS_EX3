@@ -3,4 +3,4 @@ project(OS_EX3)
 
 set(CMAKE_CXX_STANDARD 11)
 
-add_executable(OS_EX3 main.cpp)
+add_executable(OS_EX3 main.cpp MapReduceFramework.cpp)
