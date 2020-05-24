@@ -170,5 +170,6 @@ void getJobState(JobHandle job, JobState *state)
 
 void closeJobHandle(JobHandle job)
 {
+    waitForJob(job);
     delete (Job *) job;
 }
