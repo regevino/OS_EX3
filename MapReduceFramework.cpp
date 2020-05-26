@@ -7,6 +7,7 @@
 #include <atomic>
 #include <algorithm>
 #include <iostream>
+#include <cmath>
 
 class Job
 {
@@ -35,15 +36,20 @@ public:
                     oldIndex = (job.sharedIndex)++;
                 }
                 pthread_mutex_lock(&mutex);
-                job.numOfMappingFinished++;
-                std::cerr << "FINISHED MAPPING\n";
+                int previousNum = job.numOfMappingFinished++;
+                if (previousNum == job.workerThreads.size() - 1)
+                {
+                    job.stage = stage_t::SHUFFLE_STAGE;
+                }
                 pthread_cond_wait(&(job.shufflePhase), &mutex);
                 pthread_mutex_unlock(&mutex);
             }
             else
             {
-                while (job.numOfMappingFinished < job.workerThreads.size())
+                bool moreToShuffle = true;
+                while (moreToShuffle || job.numOfMappingFinished < job.workerThreads.size())
                 {
+                    moreToShuffle = false;
                     for (auto &workerThread: job.workerThreads)
                     {
                         pthread_mutex_lock(&workerThread.mutex);
@@ -51,8 +57,13 @@ public:
                         {
                             auto output = workerThread.outputVector.back();
                             workerThread.outputVector.pop_back();
+                            if (!workerThread.outputVector.empty())
+                            {
+                                moreToShuffle = true;
+                            }
                             pthread_mutex_unlock(&workerThread.mutex);
                             job.shuffleMap[output.first].push_back(output.second);
+                            ++job.shuffledKeys;
                         }
                         else
                         {
@@ -60,16 +71,15 @@ public:
                         }
                     }
                 }
-                std::cerr << "FINISHED SHUFFLE\n";
                 std::transform(job.shuffleMap.begin(), job.shuffleMap.end(),
                         std::back_inserter(job.outputKeys),
                         [](const std::pair<K2* const,std::vector<V2*>>&pair){ return pair.first;});
                 job.sharedIndex = 0;
                 job.numOfMappingFinished = 0;
+                job.stage = stage_t::REDUCE_STAGE;
                 pthread_cond_broadcast(&(job.shufflePhase));
             }
 
-            std::cerr << "STARTED REDUCE\n";
             int oldIndex = (job.sharedIndex)++;
             while (oldIndex < job.outputKeys.size())
             {
@@ -78,11 +88,12 @@ public:
                 oldIndex = (job.sharedIndex)++;
             }
 
-            int numFinished = job.numOfMappingFinished++;
-
-            std::cerr << "FINISHED REDUCE WITH INDEX " << job.sharedIndex <<"\n";
-            if (numFinished == job.workerThreads.size())
+            if (this == &job.shuffleThread)
             {
+                for (auto &th: job.workerThreads)
+                {
+                    pthread_join(th.thread, nullptr);
+                }
                 pthread_cond_broadcast(&job.jobDone);
             }
         }
@@ -91,12 +102,14 @@ public:
             pthread_mutex_lock(&mutex);
             outputVector.emplace_back(key, value);
             pthread_mutex_unlock(&mutex);
+            ++job.mappedKeys;
         }
         void emit3(K3 *key, V3 *value)
         {
             pthread_mutex_lock(&job.outputVecMutex);
             job.outputVec.emplace_back(key, value);
             pthread_mutex_unlock(&job.outputVecMutex);
+            ++job.reducedKeys;
         }
         static void* runThread(void* arg)
         {
@@ -112,8 +125,12 @@ public:
                                 shufflePhase(PTHREAD_COND_INITIALIZER), shuffleThread(*this, true),
                                 outputVecMutex(PTHREAD_MUTEX_INITIALIZER),
                                 waitMutex(PTHREAD_MUTEX_INITIALIZER),
-                                jobDone(PTHREAD_COND_INITIALIZER)
+                                jobDone(PTHREAD_COND_INITIALIZER),
+                                mappedKeys(0),
+                                shuffledKeys(0),
+                                reducedKeys(0)
     {
+        stage = stage_t::MAP_STAGE;
         for (auto &thread: workerThreads)
         {
             pthread_create(&thread.thread, nullptr, WorkerThread::runThread, &thread);
@@ -121,10 +138,29 @@ public:
         pthread_create(&shuffleThread.thread, nullptr, WorkerThread::runThread, &shuffleThread);
     }
 
-    void waitForJob()
+    void waitForJob()  //TODO check if job has finished already
     {
         pthread_mutex_lock(&waitMutex);
         pthread_cond_wait(&jobDone, &waitMutex);
+    }
+
+    void getJobState(JobState *state)
+    {
+        state->stage = stage;
+        switch (state->stage)
+        {
+            case stage_t::MAP_STAGE:
+                state->percentage = 100 * (float) sharedIndex / inputVec.size();
+                break;
+            case stage_t::SHUFFLE_STAGE:
+                state->percentage = 100 * (float) shuffledKeys / mappedKeys;
+                break;
+            case stage_t::REDUCE_STAGE:
+                state->percentage = 100 * (float) reducedKeys / shuffledKeys;
+                break;
+            case stage_t::UNDEFINED_STAGE:
+                state->percentage = NAN;
+        }
     }
 private:
     const MapReduceClient &client;
@@ -140,6 +176,10 @@ private:
     pthread_mutex_t outputVecMutex;
     pthread_mutex_t waitMutex;
     pthread_cond_t jobDone;
+    stage_t stage;
+    std::atomic<int> mappedKeys;
+    std::atomic<int> shuffledKeys;
+    std::atomic<int> reducedKeys;
 };
 
 JobHandle startMapReduceJob(const MapReduceClient &client, const InputVec &inputVec,
@@ -165,7 +205,7 @@ void waitForJob(JobHandle job)
 
 void getJobState(JobHandle job, JobState *state)
 {
-
+    ((Job *) job)->getJobState(state);
 }
 
 void closeJobHandle(JobHandle job)
