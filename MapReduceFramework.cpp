@@ -150,16 +150,22 @@ public:
         switch (state->stage)
         {
             case stage_t::MAP_STAGE:
+            	if(inputVec.size() <= sharedIndex)
+				{
+					state->percentage = 100.0;
+					return;
+				}
                 state->percentage = 100 * (float) sharedIndex / inputVec.size();
-                break;
+				return;
             case stage_t::SHUFFLE_STAGE:
                 state->percentage = 100 * (float) shuffledKeys / mappedKeys;
-                break;
+				return;
             case stage_t::REDUCE_STAGE:
                 state->percentage = 100 * (float) reducedKeys / shuffledKeys;
-                break;
+                return;
             case stage_t::UNDEFINED_STAGE:
                 state->percentage = NAN;
+				return;
         }
     }
 private:
