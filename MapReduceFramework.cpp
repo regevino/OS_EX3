@@ -138,8 +138,14 @@ public:
         pthread_create(&shuffleThread.thread, nullptr, WorkerThread::runThread, &shuffleThread);
     }
 
-    void waitForJob()  //TODO check if job has finished already
+    void waitForJob()
     {
+    	JobState currentState;
+    	getJobState(&currentState);
+    	if (currentState.stage == stage_t::REDUCE_STAGE && currentState.percentage >= 100)
+		{
+			return;
+		}
         pthread_mutex_lock(&waitMutex);
         pthread_cond_wait(&jobDone, &waitMutex);
     }
