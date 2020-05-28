@@ -62,15 +62,15 @@ public:
                     job.client.map(job.inputVec[oldIndex].first, job.inputVec[oldIndex].second, this);
                     oldIndex = (job.sharedIndex)++;
                 }
-                int previousNum = job.numOfMappingFinished++;
-                if (previousNum == (int)job.workerThreads.size() - 1)
-                {
-                    job.stage = stage_t::SHUFFLE_STAGE;
-                }
                 if(pthread_mutex_lock(&job.shuffleWaitMutex))
                 {
                     std::cerr << SYS_ERR << MUTEX_LOCK_ERR;
                     exit(EXIT_FAILURE);
+                }
+                int previousNum = job.numOfMappingFinished++;
+                if (previousNum == (int)job.workerThreads.size() - 1)
+                {
+                    job.stage = stage_t::SHUFFLE_STAGE;
                 }
                 if(pthread_cond_wait(&(job.shufflePhase), &job.shuffleWaitMutex))
                 {
@@ -86,7 +86,7 @@ public:
             else
             {
                 bool moreToShuffle = true;
-                while (moreToShuffle || job.numOfMappingFinished < (int)job.workerThreads.size())
+                while (job.stage == stage_t ::MAP_STAGE|| moreToShuffle)
                 {
                     moreToShuffle = false;
                     for (auto &workerThread: job.workerThreads)
@@ -96,36 +96,35 @@ public:
                             std::cerr << SYS_ERR << MUTEX_LOCK_ERR;
                             exit(EXIT_FAILURE);
                         }
-                        if (!workerThread.outputVector.empty())
+                        while (!workerThread.outputVector.empty())
                         {
+                            moreToShuffle=true;
                             auto output = workerThread.outputVector.back();
                             workerThread.outputVector.pop_back();
-                            if (!workerThread.outputVector.empty())
-                            {
-                                moreToShuffle = true;
-                            }
-                            if(pthread_mutex_unlock(&workerThread.mutex))
-                            {
-                                std::cerr << SYS_ERR << MUTEX_UNLOCK_ERR;
-                                exit(EXIT_FAILURE);
-                            }
                             job.shuffleMap[output.first].push_back(output.second);
                             ++job.shuffledKeys;
                         }
-                        else
+                        if(pthread_mutex_unlock(&workerThread.mutex))
                         {
-                            if(pthread_mutex_unlock(&workerThread.mutex))
-                            {
-                                std::cerr << SYS_ERR << MUTEX_UNLOCK_ERR;
-                                exit(EXIT_FAILURE);
-                            }
+                            std::cerr << SYS_ERR << MUTEX_UNLOCK_ERR;
+                            exit(EXIT_FAILURE);
                         }
+
                     }
                 }
                 std::transform(job.shuffleMap.begin(), job.shuffleMap.end(),
                         std::back_inserter(job.outputKeys),
                         [](const std::pair<K2* const,std::vector<V2*>>&pair){ return pair.first;});
-                job.numOfMappingFinished = 0;
+                if(pthread_mutex_lock(&job.waitMutex))
+                {
+                    std::cerr << SYS_ERR << MUTEX_LOCK_ERR;
+                    exit(EXIT_FAILURE);
+                }
+                if(pthread_mutex_lock(&job.shuffleWaitMutex))
+                {
+                    std::cerr << SYS_ERR << MUTEX_LOCK_ERR;
+                    exit(EXIT_FAILURE);
+                }
                 job.stage = stage_t::REDUCE_STAGE;
                 job.sharedIndex = 0;
                 if (pthread_cond_broadcast(&(job.shufflePhase)))
@@ -133,18 +132,23 @@ public:
                     std::cerr << SYS_ERR << COND_BROAD_ERR;
                     exit(EXIT_FAILURE);
                 }
+                if(pthread_mutex_unlock(&job.shuffleWaitMutex))
+                {
+                    std::cerr << SYS_ERR << MUTEX_LOCK_ERR;
+                    exit(EXIT_FAILURE);
+                }
+
             }
 
             int oldIndex = (job.sharedIndex)++;
             while (oldIndex < (int)job.outputKeys.size())
             {
                 auto key = job.outputKeys[oldIndex];
-                assert(job.shuffleMap.count(key) > 0);
                 job.client.reduce(key, job.shuffleMap[key], this);
                 oldIndex = (job.sharedIndex)++;
             }
 
-            if (this->isShuffleThread)
+            if (isShuffleThread)
             {
                 for (auto &th: job.workerThreads)
                 {
@@ -153,15 +157,6 @@ public:
                         std::cerr << SYS_ERR << JOIN_ERR;
                         exit(EXIT_FAILURE);
                     }
-                }
-//                for (auto &e: job.outputVec)
-//                {
-//                    std::cerr << "key: " << e.first << ", value: " << e.second << "\n";
-//                }
-                if(pthread_mutex_lock(&job.waitMutex))
-                {
-                    std::cerr << SYS_ERR << MUTEX_LOCK_ERR;
-                    exit(EXIT_FAILURE);
                 }
                 if (pthread_cond_broadcast(&job.jobDone))
                 {
@@ -244,6 +239,7 @@ public:
 
     ~Job()
     {
+        pthread_join(shuffleThread.thread, nullptr);
         if (pthread_cond_broadcast(&jobDone))
         {
             std::cerr << SYS_ERR << COND_BROAD_ERR;
@@ -263,19 +259,18 @@ public:
     {
     	JobState currentState;
     	getJobState(&currentState);
-//    	if (currentState.stage == stage_t::REDUCE_STAGE && currentState.percentage >= 100)
-//		{
-//			return;
-//		}
         if(pthread_mutex_lock(&waitMutex))
         {
             std::cerr << SYS_ERR << MUTEX_LOCK_ERR;
             exit(EXIT_FAILURE);
         }
-        if(pthread_cond_wait(&jobDone, &waitMutex))
+        if (currentState.stage != stage_t::REDUCE_STAGE)
         {
-            std::cerr << SYS_ERR << COND_WAIT_ERR;
-            exit(EXIT_FAILURE);
+            if(pthread_cond_wait(&jobDone, &waitMutex))
+            {
+                std::cerr << SYS_ERR << COND_WAIT_ERR;
+                exit(EXIT_FAILURE);
+            }
         }
         if(pthread_mutex_unlock(&waitMutex))
         {
@@ -302,7 +297,7 @@ public:
                 state->percentage = 100 * (float) shuffledKeys / mappedKeys;
 				return;
             case stage_t::REDUCE_STAGE:
-                state->percentage = 100 * (float) reducedKeys / shuffledKeys;
+                state->percentage = 100 * (float) reducedKeys / shuffleMap.size();
                 return;
             case stage_t::UNDEFINED_STAGE:
                 state->percentage = NAN;
@@ -316,7 +311,7 @@ private:
     std::atomic<int> sharedIndex;
     std::atomic<int> numOfMappingFinished;
     pthread_cond_t shufflePhase;
-    std::map<K2*, std::vector<V2*>> shuffleMap;
+    IntermediateMap shuffleMap;
     std::vector<WorkerThread> workerThreads;
     WorkerThread shuffleThread;
     std::vector<K2*> outputKeys;
