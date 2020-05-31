@@ -26,18 +26,38 @@
 
 #define DESTRUCT_ERR "cond or mutex destroy failed\n"
 
+
+static void mutex_lock_wrapper(pthread_mutex_t &mutex)
+{
+    if (pthread_mutex_lock(&mutex))
+    {
+        std::cerr << SYS_ERR << MUTEX_LOCK_ERR;
+        exit(EXIT_FAILURE);
+    }
+}
+
+static void mutex_unlock_wrapper(pthread_mutex_t &mutex)
+{
+    if (pthread_mutex_unlock(&mutex))
+    {
+        std::cerr << SYS_ERR << MUTEX_UNLOCK_ERR;
+        exit(EXIT_FAILURE);
+    }
+}
+
 class Job
 {
 public:
     class WorkerThread
     {
     private:
-        std::vector<std::pair<K2*, V2*>> outputVector;
+        std::vector<std::pair<K2 *, V2 *>> outputVector;
         Job &job;
         pthread_mutex_t mutex;
-    public:
         bool isShuffleThread;
+    public:
         pthread_t thread{};
+
         explicit WorkerThread(Job &job, bool isShuffle = false)
                 : job(job), mutex(PTHREAD_MUTEX_INITIALIZER), isShuffleThread(isShuffle)
         {
@@ -52,96 +72,68 @@ public:
             }
         }
 
-        void threadWork()
+        void mapWork()
         {
-            if (!isShuffleThread)
-            {
-                int oldIndex = (job.sharedIndex)++;
-                while (oldIndex < (int)job.inputVec.size())
-                {
-                    job.client.map(job.inputVec[oldIndex].first, job.inputVec[oldIndex].second, this);
-                    oldIndex = (job.sharedIndex)++;
-                }
-                if(pthread_mutex_lock(&job.shuffleWaitMutex))
-                {
-                    std::cerr << SYS_ERR << MUTEX_LOCK_ERR;
-                    exit(EXIT_FAILURE);
-                }
-                int previousNum = job.numOfMappingFinished++;
-                if (previousNum == (int)job.workerThreads.size() - 1)
-                {
-                    job.stage = stage_t::SHUFFLE_STAGE;
-                }
-                if(pthread_cond_wait(&(job.shufflePhase), &job.shuffleWaitMutex))
-                {
-                    std::cerr << SYS_ERR << COND_WAIT_ERR;
-                    exit(EXIT_FAILURE);
-                }
-                if(pthread_mutex_unlock(&job.shuffleWaitMutex))
-                {
-                    std::cerr << SYS_ERR << MUTEX_UNLOCK_ERR;
-                    exit(EXIT_FAILURE);
-                }
-            }
-            else
-            {
-                bool moreToShuffle = true;
-                while (job.stage == stage_t ::MAP_STAGE|| moreToShuffle)
-                {
-                    moreToShuffle = false;
-                    for (auto &workerThread: job.workerThreads)
-                    {
-                        if(pthread_mutex_lock(&workerThread.mutex))
-                        {
-                            std::cerr << SYS_ERR << MUTEX_LOCK_ERR;
-                            exit(EXIT_FAILURE);
-                        }
-                        while (!workerThread.outputVector.empty())
-                        {
-                            moreToShuffle=true;
-                            auto output = workerThread.outputVector.back();
-                            workerThread.outputVector.pop_back();
-                            job.shuffleMap[output.first].push_back(output.second);
-                            ++job.shuffledKeys;
-                        }
-                        if(pthread_mutex_unlock(&workerThread.mutex))
-                        {
-                            std::cerr << SYS_ERR << MUTEX_UNLOCK_ERR;
-                            exit(EXIT_FAILURE);
-                        }
-
-                    }
-                }
-                std::transform(job.shuffleMap.begin(), job.shuffleMap.end(),
-                        std::back_inserter(job.outputKeys),
-                        [](const std::pair<K2* const,std::vector<V2*>>&pair){ return pair.first;});
-                if(pthread_mutex_lock(&job.waitMutex))
-                {
-                    std::cerr << SYS_ERR << MUTEX_LOCK_ERR;
-                    exit(EXIT_FAILURE);
-                }
-                if(pthread_mutex_lock(&job.shuffleWaitMutex))
-                {
-                    std::cerr << SYS_ERR << MUTEX_LOCK_ERR;
-                    exit(EXIT_FAILURE);
-                }
-                job.stage = stage_t::REDUCE_STAGE;
-                job.sharedIndex = 0;
-                if (pthread_cond_broadcast(&(job.shufflePhase)))
-                {
-                    std::cerr << SYS_ERR << COND_BROAD_ERR;
-                    exit(EXIT_FAILURE);
-                }
-                if(pthread_mutex_unlock(&job.shuffleWaitMutex))
-                {
-                    std::cerr << SYS_ERR << MUTEX_LOCK_ERR;
-                    exit(EXIT_FAILURE);
-                }
-
-            }
-
             int oldIndex = (job.sharedIndex)++;
-            while (oldIndex < (int)job.outputKeys.size())
+            while (oldIndex < (int) job.inputVec.size())
+            {
+                job.client.map(job.inputVec[oldIndex].first, job.inputVec[oldIndex].second, this);
+                oldIndex = (job.sharedIndex)++;
+            }
+            mutex_lock_wrapper(job.shuffleWaitMutex);
+            int previousNum = job.numOfMappingFinished++;
+            if (previousNum == (int) job.workerThreads.size() - 1)
+            {
+                job.stage = stage_t::SHUFFLE_STAGE;
+            }
+            if (pthread_cond_wait(&(job.shufflePhase), &job.shuffleWaitMutex))
+            {
+                std::cerr << SYS_ERR << COND_WAIT_ERR;
+                exit(EXIT_FAILURE);
+            }
+            mutex_unlock_wrapper(job.shuffleWaitMutex);
+        }
+
+        void shuffleWork()
+        {
+            bool moreToShuffle = true;
+            while (job.stage == stage_t::MAP_STAGE || moreToShuffle)
+            {
+                moreToShuffle = false;
+                for (auto &workerThread: job.workerThreads)
+                {
+                    mutex_lock_wrapper(workerThread.mutex);
+                    while (!workerThread.outputVector.empty())
+                    {
+                        moreToShuffle = true;
+                        auto output = workerThread.outputVector.back();
+                        workerThread.outputVector.pop_back();
+                        job.shuffleMap[output.first].push_back(output.second);
+                        ++job.shuffledKeys;
+                    }
+                    mutex_unlock_wrapper(workerThread.mutex);
+                }
+            }
+            std::transform(job.shuffleMap.begin(), job.shuffleMap.end(),
+                           std::back_inserter(job.outputKeys),
+                           [](const std::pair<K2 *const, std::vector<V2 *>> &pair) { return pair.first; });
+            mutex_lock_wrapper(job.waitMutex);
+            mutex_lock_wrapper(job.shuffleWaitMutex);
+            job.stage = stage_t::REDUCE_STAGE;
+            job.sharedIndex = 0;
+            if (pthread_cond_broadcast(&(job.shufflePhase)))
+            {
+                std::cerr << SYS_ERR << COND_BROAD_ERR;
+                exit(EXIT_FAILURE);
+            }
+            mutex_unlock_wrapper(job.shuffleWaitMutex);
+
+        }
+
+        void reduceWork()
+        {
+            int oldIndex = (job.sharedIndex)++;
+            while (oldIndex < (int) job.outputKeys.size())
             {
                 auto key = job.outputKeys[oldIndex];
                 job.client.reduce(key, job.shuffleMap[key], this);
@@ -163,44 +155,40 @@ public:
                     std::cerr << SYS_ERR << COND_BROAD_ERR;
                     exit(EXIT_FAILURE);
                 }
-                if(pthread_mutex_unlock(&job.waitMutex))
-                {
-                    std::cerr << SYS_ERR << MUTEX_UNLOCK_ERR;
-                    exit(EXIT_FAILURE);
-                }
+                mutex_unlock_wrapper(job.waitMutex);
             }
         }
+
+        void threadWork()
+        {
+            if (!isShuffleThread)
+            {
+                mapWork();
+            }
+            else
+            {
+                shuffleWork();
+            }
+            reduceWork();
+        }
+
         void emit2(K2 *key, V2 *value)
         {
-            if(pthread_mutex_lock(&mutex))
-            {
-                std::cerr << SYS_ERR << MUTEX_LOCK_ERR;
-                exit(EXIT_FAILURE);
-            }
+            mutex_lock_wrapper(mutex);
             outputVector.emplace_back(key, value);
-            if(pthread_mutex_unlock(&mutex))
-            {
-                std::cerr << SYS_ERR << MUTEX_UNLOCK_ERR;
-                exit(EXIT_FAILURE);
-            }
+            mutex_unlock_wrapper(mutex);
             ++job.mappedKeys;
         }
+
         void emit3(K3 *key, V3 *value)
         {
-            if(pthread_mutex_lock(&job.outputVecMutex))
-            {
-                std::cerr << SYS_ERR << MUTEX_LOCK_ERR;
-                exit(EXIT_FAILURE);
-            }
+            mutex_lock_wrapper(job.outputVecMutex);
             job.outputVec.emplace_back(key, value);
-            if(pthread_mutex_unlock(&job.outputVecMutex))
-            {
-                std::cerr << SYS_ERR << MUTEX_UNLOCK_ERR;
-                exit(EXIT_FAILURE);
-            }
+            mutex_unlock_wrapper(job.outputVecMutex);
             ++job.reducedKeys;
         }
-        static void* runThread(void* arg)
+
+        static void *runThread(void *arg)
         {
             ((WorkerThread *) arg)->threadWork();
             return nullptr;
@@ -209,28 +197,29 @@ public:
 
     Job(const MapReduceClient &client, const InputVec &inputVec, OutputVec &outputVec,
         int multiThreadLevel) : client(client), inputVec(inputVec), outputVec(outputVec),
-                                sharedIndex(0), numOfMappingFinished(0),
-                                shufflePhase(PTHREAD_COND_INITIALIZER),
                                 workerThreads(multiThreadLevel - 1, WorkerThread(*this)),
                                 shuffleThread(*this, true),
                                 outputVecMutex(PTHREAD_MUTEX_INITIALIZER),
                                 waitMutex(PTHREAD_MUTEX_INITIALIZER),
+                                shuffleWaitMutex(PTHREAD_MUTEX_INITIALIZER),
+                                shufflePhase(PTHREAD_COND_INITIALIZER),
                                 jobDone(PTHREAD_COND_INITIALIZER),
+                                sharedIndex(0),
+                                numOfMappingFinished(0),
+                                stage(stage_t::MAP_STAGE),
                                 mappedKeys(0),
                                 shuffledKeys(0),
-                                reducedKeys(0),
-                                shuffleWaitMutex(PTHREAD_MUTEX_INITIALIZER)
+                                reducedKeys(0)
     {
-        stage = stage_t::MAP_STAGE;
         for (auto &thread: workerThreads)
         {
-            if(pthread_create(&thread.thread, nullptr, WorkerThread::runThread, &thread))
+            if (pthread_create(&thread.thread, nullptr, WorkerThread::runThread, &thread))
             {
                 std::cerr << SYS_ERR << CREATE_ERR;
                 exit(EXIT_FAILURE);
             }
         }
-        if(pthread_create(&shuffleThread.thread, nullptr, WorkerThread::runThread, &shuffleThread))
+        if (pthread_create(&shuffleThread.thread, nullptr, WorkerThread::runThread, &shuffleThread))
         {
             std::cerr << SYS_ERR << CREATE_ERR;
             exit(EXIT_FAILURE);
@@ -257,73 +246,67 @@ public:
 
     void waitForJob()
     {
-    	JobState currentState;
-    	getJobState(&currentState);
-        if(pthread_mutex_lock(&waitMutex))
-        {
-            std::cerr << SYS_ERR << MUTEX_LOCK_ERR;
-            exit(EXIT_FAILURE);
-        }
+        JobState currentState;
+        getJobState(&currentState);
+        mutex_lock_wrapper(waitMutex);
         if (currentState.stage != stage_t::REDUCE_STAGE)
         {
-            if(pthread_cond_wait(&jobDone, &waitMutex))
+            if (pthread_cond_wait(&jobDone, &waitMutex))
             {
                 std::cerr << SYS_ERR << COND_WAIT_ERR;
                 exit(EXIT_FAILURE);
             }
         }
-        if(pthread_mutex_unlock(&waitMutex))
-        {
-            std::cerr << SYS_ERR << MUTEX_UNLOCK_ERR;
-            exit(EXIT_FAILURE);
-        }
+        mutex_unlock_wrapper(waitMutex);
     }
 
     void getJobState(JobState *state)
     {
         int curSharedIndex = sharedIndex;
-        state->stage = (stage_t)(int)stage;
+        state->stage = (stage_t) (int) stage;
         switch (state->stage)
         {
             case stage_t::MAP_STAGE:
-            	if((int)inputVec.size() <= curSharedIndex)
-				{
-					state->percentage = 100.0;
-					return;
-				}
+                if ((int) inputVec.size() <= curSharedIndex)
+                {
+                    state->percentage = 100.0;
+                    return;
+                }
                 state->percentage = 100 * (float) curSharedIndex / inputVec.size();
-				return;
+                return;
             case stage_t::SHUFFLE_STAGE:
                 state->percentage = 100 * (float) shuffledKeys / mappedKeys;
-				return;
+                return;
             case stage_t::REDUCE_STAGE:
                 state->percentage = 100 * (float) reducedKeys / shuffleMap.size();
                 return;
             case stage_t::UNDEFINED_STAGE:
                 state->percentage = NAN;
-				return;
+                return;
         }
     }
+
 private:
     const MapReduceClient &client;
     const InputVec &inputVec;
     OutputVec &outputVec;
-    std::atomic<int> sharedIndex;
-    std::atomic<int> numOfMappingFinished;
-    pthread_cond_t shufflePhase;
     IntermediateMap shuffleMap;
     std::vector<WorkerThread> workerThreads;
+    std::vector<K2 *> outputKeys;
     WorkerThread shuffleThread;
-    std::vector<K2*> outputKeys;
     pthread_mutex_t outputVecMutex;
     pthread_mutex_t waitMutex;
+    pthread_mutex_t shuffleWaitMutex;
+    pthread_cond_t shufflePhase;
     pthread_cond_t jobDone;
+    std::atomic<int> sharedIndex;
+    std::atomic<int> numOfMappingFinished;
     std::atomic<int> stage;
     std::atomic<int> mappedKeys;
     std::atomic<int> shuffledKeys;
     std::atomic<int> reducedKeys;
-    pthread_mutex_t shuffleWaitMutex;
 };
+
 
 JobHandle startMapReduceJob(const MapReduceClient &client, const InputVec &inputVec,
                             OutputVec &outputVec, int multiThreadLevel)
