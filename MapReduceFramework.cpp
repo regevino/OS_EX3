@@ -101,16 +101,21 @@ public:
          */
         void mapWork()
         {
+            // Get the current index to chhose an input element to map.
             int oldIndex = (job.sharedIndex)++;
             while (oldIndex < (int) job.inputVec.size())
             {
+                // As long as the index still point to an input element, map it and advance.
                 job.client.map(job.inputVec[oldIndex].first, job.inputVec[oldIndex].second, this);
                 oldIndex = (job.sharedIndex)++;
             }
+
+            // Notify that this thread is done with mapping and wait for shuffle to finish.
             mutex_lock_wrapper(job.shuffleWaitMutex);
             int previousNum = job.numOfMappingFinished++;
             if (previousNum == (int) job.workerThreads.size() - 1)
             {
+                // If this is the last thread to arrive here, start shuffle phase.
                 job.stage = stage_t::SHUFFLE_STAGE;
             }
             if (pthread_cond_wait(&(job.shufflePhase), &job.shuffleWaitMutex))
@@ -129,9 +134,12 @@ public:
             bool moreToShuffle = true;
             while (job.stage == stage_t::MAP_STAGE || moreToShuffle)
             {
+                // As long as either shuffle stage has not started yet, or there are output vectors
+                // that are not empty, shuffle them.
                 moreToShuffle = false;
                 for (auto &workerThread: job.workerThreads)
                 {
+                    // Iterate through the treads, and for every thread, process its output.
                     mutex_lock_wrapper(workerThread.mutex);
                     while (!workerThread.outputVector.empty())
                     {
@@ -139,16 +147,23 @@ public:
                         auto output = workerThread.outputVector.back();
                         workerThread.outputVector.pop_back();
                         job.shuffleMap[output.first].push_back(output.second);
+                        // Increment the count of processed keys, for progress report.
                         ++job.shuffledKeys;
                     }
                     mutex_unlock_wrapper(workerThread.mutex);
                 }
             }
+            // Done shuffling, and all other threads are waiting.
+
+            // Create a vector off all the keys in the map.
             std::transform(job.shuffleMap.begin(), job.shuffleMap.end(),
                            std::back_inserter(job.outputKeys),
                            [](const std::pair<K2 *const, std::vector<V2 *>> &pair) { return pair.first; });
+
+            // Lock the wait mutex. At this point any call to waitForJob will block on waitMutex.
             mutex_lock_wrapper(job.waitMutex);
             mutex_lock_wrapper(job.shuffleWaitMutex);
+            // Set the stage to Reduce stage. Reset the shared index and notify the threads.
             job.stage = stage_t::REDUCE_STAGE;
             job.sharedIndex = 0;
             if (pthread_cond_broadcast(&(job.shufflePhase)))
@@ -165,6 +180,7 @@ public:
          */
         void reduceWork()
         {
+            // Choose the key to work on through the shared index, as before.
             int oldIndex = (job.sharedIndex)++;
             while (oldIndex < (int) job.outputKeys.size())
             {
@@ -173,6 +189,8 @@ public:
                 oldIndex = (job.sharedIndex)++;
             }
 
+            // After the reduce work is done, if this thread is the shuffle thread, it should join all the other threads
+            // and notify anyone else that the job is done.
             if (isShuffleThread)
             {
                 for (auto &th: job.workerThreads)
@@ -197,13 +215,13 @@ public:
          */
         void threadWork()
         {
-            if (!isShuffleThread)
+            if (isShuffleThread)
             {
-                mapWork();
+                shuffleWork();
             }
             else
             {
-                shuffleWork();
+                mapWork();
             }
             reduceWork();
         }
@@ -213,6 +231,7 @@ public:
          */
         void emit2(K2 *key, V2 *value)
         {
+            // Lock the mutex as output vector is shared with the shuffle thread.
             mutex_lock_wrapper(mutex);
             outputVector.emplace_back(key, value);
             mutex_unlock_wrapper(mutex);
@@ -224,6 +243,7 @@ public:
          */
         void emit3(K3 *key, V3 *value)
         {
+            // Lock the output mutex as output vector is shared with all the threads.
             mutex_lock_wrapper(job.outputVecMutex);
             job.outputVec.emplace_back(key, value);
             mutex_unlock_wrapper(job.outputVecMutex);
@@ -265,6 +285,7 @@ public:
                                 shuffledKeys(0),
                                 reducedKeys(0)
     {
+        // Create all the required threads to start the job.
         for (auto &thread: workerThreads)
         {
             if (pthread_create(&thread.thread, nullptr, WorkerThread::runThread, &thread))
@@ -285,12 +306,16 @@ public:
      */
     ~Job()
     {
+        // Join the shuffle thread as nobody else will do that.
         pthread_join(shuffleThread.thread, nullptr);
+
+        // No thread should be waiting for job done, but if there are, wake them.
         if (pthread_cond_broadcast(&jobDone))
         {
             std::cerr << SYS_ERR << COND_BROAD_ERR;
             exit(EXIT_FAILURE);
         }
+        // Destroy all the mutexi and condition variables.
         if (pthread_mutex_destroy(&outputVecMutex)
             || pthread_mutex_destroy(&waitMutex)
             || pthread_cond_destroy(&shufflePhase)
@@ -306,11 +331,14 @@ public:
      */
     void waitForJob()
     {
+        // Get the current state of the job.
         JobState currentState;
         getJobState(&currentState);
         mutex_lock_wrapper(waitMutex);
         if (currentState.stage != stage_t::REDUCE_STAGE)
         {
+            // If the stage is reduce stage, the mutex will be locked until the job is done.
+            // Oterwise block on the jobDone variable.
             if (pthread_cond_wait(&jobDone, &waitMutex))
             {
                 std::cerr << SYS_ERR << COND_WAIT_ERR;
@@ -326,10 +354,13 @@ public:
      */
     void getJobState(JobState *state)
     {
+        // Get the current shared index and stage.
         int curSharedIndex = sharedIndex;
         state->stage = (stage_t) (int) stage;
         switch (state->stage)
         {
+            // For every relevant stage, calculate the current percentage according to data stored in atomic
+            // variables:
             case stage_t::MAP_STAGE:
                 if ((int) inputVec.size() <= curSharedIndex)
                 {
