@@ -5,6 +5,7 @@ EX: 3
 FILES:
 README - this file.
 Makefile
+MapReduceFramework.cpp - The source file of this project.
 fileWordCounter_comparison.png - 
 
 REMARKS:
@@ -12,6 +13,8 @@ REMARKS:
 ANSWERS:
 
 Q1:
-
+The optimal number of kernel-level threads will be the same as the number of cores the CPU has.
 
 Q2:
+a. The number of lines that will be printed is 2n.
+b. The number of different options is n! * n!.
