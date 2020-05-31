@@ -2,7 +2,7 @@ CC=g++
 CXX=g++
 RANLIB=ranlib
 
-LIBSRC=MapReduceFramework.cpp Barrier.cpp
+LIBSRC=MapReduceFramework.cpp
 LIBOBJ=$(LIBSRC:.cpp=.o)
 
 INCS=-I.
@@ -14,8 +14,8 @@ TARGETS = $(OSMLIB)
 
 TAR=tar
 TARFLAGS=-cvf
-TARNAME=ex5.tar
-TARSRCS=$(LIBSRC) Makefile README Barrier.h
+TARNAME=ex3.tar
+TARSRCS=$(LIBSRC) Makefile README fileWordCounter_comparison.png
 
 all: $(TARGETS)
 
