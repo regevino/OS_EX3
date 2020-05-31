@@ -26,7 +26,10 @@
 
 #define DESTRUCT_ERR "cond or mutex destroy failed\n"
 
-
+/**
+ * Wrapper for mutex lock with error message and exit on failure.
+ * @param mutex mutex to lock.
+ */
 static void mutex_lock_wrapper(pthread_mutex_t &mutex)
 {
     if (pthread_mutex_lock(&mutex))
@@ -36,6 +39,10 @@ static void mutex_lock_wrapper(pthread_mutex_t &mutex)
     }
 }
 
+/**
+ * Wrapper for mutex unlock with error message and exit on failure.
+ * @param mutex mutex to unlock.
+ */
 static void mutex_unlock_wrapper(pthread_mutex_t &mutex)
 {
     if (pthread_mutex_unlock(&mutex))
@@ -45,9 +52,15 @@ static void mutex_unlock_wrapper(pthread_mutex_t &mutex)
     }
 }
 
+/**
+ * Represents a single Job of the map-reduce framework.
+ */
 class Job
 {
 public:
+    /**
+     * A single thread that is part of the map-reduce framework.
+     */
     class WorkerThread
     {
     private:
@@ -56,13 +69,24 @@ public:
         pthread_mutex_t mutex;
         bool isShuffleThread;
     public:
+        /**
+         * the pthread thread of this workerThread.
+         */
         pthread_t thread{};
 
+        /**
+         * Constructor for a workerThread.
+         * @param job The job that this thread belongs to.
+         * @param isShuffle Whether or not this therad is the one that will preform shuffling.
+         */
         explicit WorkerThread(Job &job, bool isShuffle = false)
                 : job(job), mutex(PTHREAD_MUTEX_INITIALIZER), isShuffleThread(isShuffle)
         {
         }
 
+        /**
+         * Destructor for workerThread. specifically, destroy this workerThread's mutex.
+         */
         ~WorkerThread()
         {
             if (pthread_mutex_destroy(&mutex))
@@ -72,6 +96,9 @@ public:
             }
         }
 
+        /**
+         * Preform work on the map-phase of the job.
+         */
         void mapWork()
         {
             int oldIndex = (job.sharedIndex)++;
@@ -94,6 +121,9 @@ public:
             mutex_unlock_wrapper(job.shuffleWaitMutex);
         }
 
+        /**
+         * Preform work on the suffle phase of the job.
+         */
         void shuffleWork()
         {
             bool moreToShuffle = true;
@@ -130,6 +160,9 @@ public:
 
         }
 
+        /**
+         * Prefrom work on the reduce phase of the job.
+         */
         void reduceWork()
         {
             int oldIndex = (job.sharedIndex)++;
@@ -159,6 +192,9 @@ public:
             }
         }
 
+        /**
+         * Preform all the work that this thread needs to preform.
+         */
         void threadWork()
         {
             if (!isShuffleThread)
@@ -172,6 +208,9 @@ public:
             reduceWork();
         }
 
+        /**
+         * Emit a K2,V2 pair out of the map function.
+         */
         void emit2(K2 *key, V2 *value)
         {
             mutex_lock_wrapper(mutex);
@@ -180,6 +219,9 @@ public:
             ++job.mappedKeys;
         }
 
+        /**
+         * Emit a K3, V3 pair from the reduce function.
+         */
         void emit3(K3 *key, V3 *value)
         {
             mutex_lock_wrapper(job.outputVecMutex);
@@ -188,6 +230,11 @@ public:
             ++job.reducedKeys;
         }
 
+        /**
+         * Run the thread's work function. This is a handle function for pthread_create.
+         * @param arg In this case, a pointer to the current thread object (this).
+         * @return nullptr.
+         */
         static void *runThread(void *arg)
         {
             ((WorkerThread *) arg)->threadWork();
@@ -195,6 +242,13 @@ public:
         }
     };
 
+    /**
+     * Constructor for a Map_reduce framework job.
+     * @param client The client for this job.
+     * @param inputVec Input vector of elements for this job.
+     * @param outputVec Output vector for results of this job.
+     * @param multiThreadLevel Number of thread to do concurrent work on this job.
+     */
     Job(const MapReduceClient &client, const InputVec &inputVec, OutputVec &outputVec,
         int multiThreadLevel) : client(client), inputVec(inputVec), outputVec(outputVec),
                                 workerThreads(multiThreadLevel - 1, WorkerThread(*this)),
@@ -226,6 +280,9 @@ public:
         }
     }
 
+    /**
+     * Destructor for this job.
+     */
     ~Job()
     {
         pthread_join(shuffleThread.thread, nullptr);
@@ -244,6 +301,9 @@ public:
         }
     }
 
+    /**
+     * Wait for the job to finish. This function will return only after the job is finished.
+     */
     void waitForJob()
     {
         JobState currentState;
@@ -260,6 +320,10 @@ public:
         mutex_unlock_wrapper(waitMutex);
     }
 
+    /**
+     * Get the current state of the job.
+     * @param state A pointer to the struct into which the result shall be copied.
+     */
     void getJobState(JobState *state)
     {
         int curSharedIndex = sharedIndex;
